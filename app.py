@@ -5183,6 +5183,7 @@ def unify_csv_in_chunks_1m_lines():
 
     import os
     import pandas as pd
+    import csv  # Import para usar csv.QUOTE_MINIMAL
     from InquirerPy import inquirer
     from pathlib import Path
     import uuid
@@ -5217,10 +5218,9 @@ def unify_csv_in_chunks_1m_lines():
         import csv
         import chardet
 
-        # Detectar encoding (alternativa a fallback) - mas fallback também serviria
-        # Aqui podemos simplificar e só ler a primeira linha do arquivo:
+        # Detectar encoding apenas do cabeçalho (2KB de leitura)
         with open(csv_path, "rb") as f:
-            raw = f.read(2048)  # 2KB para detectar
+            raw = f.read(2048)
             enc_guess = chardet.detect(raw)
             encoding_used = enc_guess["encoding"] if enc_guess["confidence"] > 0.5 else "utf-8"
 
@@ -5259,25 +5259,18 @@ def unify_csv_in_chunks_1m_lines():
         console.print(f" - {c_}")
 
     # ---------------------------------------------------------------------------
-    # 3) Ler todos os arquivos CSV (apenas as colunas comuns) e concatenar
-    #    Precisamos de um DataFrame unificado, mas se for muito grande
-    #    poderemos precisar de streaming. A seguir, a versão "carrega tudo".
+    # 3) Ler todos os arquivos CSV (apenas as colunas comuns) e concatenar.
     # ---------------------------------------------------------------------------
-    # Perguntamos se o user tem memória suficiente ou preferimos streaming?
-    # Aqui assumimos a soma não vai estourar a memória.
     console.print("\n[cyan]Lendo todos os arquivos (apenas colunas comuns) e unificando...[/cyan]")
 
     all_data = []
     total_lines = 0
 
-    # Para fallback de encoding e colunas:
     def fallback_read_csv_with_subset(path, usecols):
         """
         Faz um fallback simples, usando read_csv + supõe ; ou , e utf-8 ou latin-1,
         mas filtra apenas as colunas do 'usecols'.
         """
-        import pandas as pd
-
         # Tenta ; + utf-8
         try:
             try:
@@ -5313,9 +5306,6 @@ def unify_csv_in_chunks_1m_lines():
         console.print("[bold red]✗ Nenhum dado foi carregado. Encerrando...[bold red]")
         return
 
-    # Concatena
-    console.print(f"\n[cyan]Somando todas as linhas: {total_lines:,}.[/cyan]")
-    # Esse DataFrame final pode ter milhões de linhas:
     df_unified = pd.concat(all_data, ignore_index=True)
     del all_data  # Libera memória
 
@@ -5324,7 +5314,7 @@ def unify_csv_in_chunks_1m_lines():
     # ---------------------------------------------------------------------------
     # 4) Dividir df_unified em blocos de 1 milhão de linhas e salvar
     # ---------------------------------------------------------------------------
-    chunk_size = 1_000_000  # 1 milhão
+    chunk_size = 1_000_000
     total_rows = len(df_unified)
 
     # Cria subpasta
@@ -5337,7 +5327,6 @@ def unify_csv_in_chunks_1m_lines():
         console.print(f"[bold red]✗ Erro ao criar subpasta '{output_dir}': {e}[bold red]")
         return
 
-    # Salvar em quantos chunks forem necessários
     num_chunks = (total_rows // chunk_size) + (1 if total_rows % chunk_size else 0)
     console.print(f"[cyan]Gerando {num_chunks} arquivos de até {chunk_size:,} linhas cada...[/cyan]\n")
 
@@ -5349,14 +5338,21 @@ def unify_csv_in_chunks_1m_lines():
         chunk_name = f"unified_chunk_{chunk_index + 1}.csv"
         chunk_path = os.path.join(output_dir, chunk_name)
 
-        # Salva
-        df_chunk.to_csv(chunk_path, index=False, sep=';', encoding='utf-8')
+        # Usar QUOTE_MINIMAL para evitar colocar aspas na linha inteira.
+        df_chunk.to_csv(
+            chunk_path,
+            index=False,
+            sep=';',
+            encoding='utf-8',
+            quoting=csv.QUOTE_MINIMAL  # Apenas campos que precisarem de aspas
+        )
         console.print(f"[green]✓ Salvo: {chunk_path} com {len(df_chunk):,} linhas.[/green]")
 
         start_idx = end_idx
 
     console.print(f"\n[bold green]✓ Processo concluído com sucesso![bold green]")
     console.print(f"[dim]Arquivos finais em: {output_dir}[dim]\n")
+
 
 
 def main():
