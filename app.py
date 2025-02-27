@@ -4908,20 +4908,19 @@ def select_common_columns_and_reduce():
 
 def deduplicate_cpfs_across_files():
     """
-    Deduplica CPFs em múltiplos arquivos (XLS[X|B], XLS, ou CSV), mantendo o CPF
-    somente no arquivo mais recente e removendo-o dos arquivos mais antigos.
+    Deduplica CPFs em múltiplos arquivos (XLS[X|B], XLS, ou CSV), removendo duplicatas
+    dentro de cada arquivo individualmente primeiro, e depois mantendo o CPF somente
+    no arquivo mais recente, removendo-o dos arquivos mais antigos.
 
-    Fluxo resumido:
-      1) Pergunta uma pasta e a extensão desejada (XLSX, XLSB, XLS, CSV).
-      2) Lista somente os arquivos dessa extensão.
+    Fluxo:
+      1) Usuário seleciona a pasta e a extensão dos arquivos (XLSX, XLSB, XLS, CSV).
+      2) Lista os arquivos com essa extensão.
       3) Garante que todos tenham colunas em comum e obtém a interseção.
       4) Usuário seleciona a coluna de CPF (entre as colunas comuns).
-      5) Usuário digita números (1 = mais recente, 2 = menos recente, etc.) para cada arquivo.
-      6) Processamos em ordem crescente (arquivos de número menor = mais recentes).
-         Isso garante que o arquivo "mais recente" seja processado primeiro e retenha todos
-         os seus CPFs, removendo-os dos arquivos que forem processados depois (mais antigos).
-      7) Salvamos cada arquivo resultante em CSV numa subpasta, mantendo o mesmo nome base
-         acrescido de "_dedup.csv".
+      5) Cada arquivo passa por remoção de duplicatas internas (mantém a 1ª ocorrência do CPF).
+      6) Usuário define a prioridade dos arquivos (1 = mais recente, maior = mais antigo).
+      7) Processamos os arquivos em ordem crescente (do mais recente ao mais antigo), removendo CPFs repetidos.
+      8) Os arquivos resultantes são salvos em CSV dentro de uma subpasta `dedup_priority`.
     """
 
     import os
@@ -4930,13 +4929,12 @@ def deduplicate_cpfs_across_files():
     from pathlib import Path
     import uuid
     from rich.console import Console
-    from rich.progress import track
 
     console = Console()
 
-    console.print("\n[bold yellow]╔══ Deduplicar CPFs entre múltiplos arquivos ══╗[/bold yellow]\n")
+    console.print("\n[bold yellow]╔══ Deduplicação de CPFs entre múltiplos arquivos ══╗[/bold yellow]\n")
 
-    # 1) Escolha de pasta e extensão
+    # 1) Escolha da pasta e extensão dos arquivos
     folder_path = inquirer.text(
         message="Digite o caminho da pasta com os arquivos:"
     ).execute()
@@ -4945,13 +4943,13 @@ def deduplicate_cpfs_across_files():
         console.print(f"[bold red]✗ O caminho '{folder_path}' não é uma pasta válida![bold red]\n")
         return
 
-    # Extensões possíveis
+    # Pergunta qual extensão será filtrada
     file_ext = inquirer.select(
-        message="Selecione a extensão dos arquivos (para deduplicar CPFs):",
+        message="Selecione a extensão dos arquivos para deduplicação:",
         choices=[".xlsx", ".xlsb", ".xls", ".csv"]
     ).execute()
 
-    # Lista arquivos
+    # Lista apenas arquivos dessa extensão
     all_files = [f for f in os.listdir(folder_path) if f.lower().endswith(file_ext)]
     if not all_files:
         console.print(f"[bold red]✗ Não há arquivos com extensão '{file_ext}' na pasta '{folder_path}'![bold red]")
@@ -4959,13 +4957,10 @@ def deduplicate_cpfs_across_files():
 
     console.print(f"[cyan]→ Encontrados {len(all_files)} arquivos com extensão '{file_ext}'.[/cyan]\n")
 
-    # Funções auxiliares --------------------------------------------------------
+    # 2) Funções auxiliares --------------------------------------------------------
 
     def convert_excel_to_csv(excel_path, out_dir=None):
-        """
-        Converte (XLS, XLSX ou XLSB) em CSV temporário (sep=';', UTF-8) e retorna o caminho do CSV.
-        Usa engine='openpyxl' para XLSX/XLSB (às vezes pyxlsb é melhor para XLSB).
-        """
+        """ Converte arquivos Excel (XLS, XLSX, XLSB) para CSV. """
         if out_dir is None:
             out_dir = os.path.dirname(excel_path)
         df_excel = pd.read_excel(excel_path, engine="openpyxl", dtype=str)
@@ -4975,9 +4970,7 @@ def deduplicate_cpfs_across_files():
         return temp_path
 
     def load_csv_fallback(csv_path):
-        """
-        Tenta ler CSV com ; ou , e codificação utf-8 ou latin-1.
-        """
+        """ Tenta carregar CSV, com diferentes delimitadores e encodings. """
         try:
             try:
                 return pd.read_csv(csv_path, sep=';', encoding='utf-8', dtype=str, low_memory=False)
@@ -4992,25 +4985,26 @@ def deduplicate_cpfs_across_files():
             except Exception as e:
                 raise e
 
-    # 2) Converter (se for Excel) e encontrar colunas comuns
+    # 3) Conversão de arquivos Excel e detecção de colunas comuns ----------------------
+
     common_columns = None
-    file_csv_map = {}  # Map: nome do arquivo original -> caminho CSV temporário ou ele próprio se já for .csv
+    file_csv_map = {}
 
     for idx, fname in enumerate(all_files, 1):
         original_path = os.path.join(folder_path, fname)
         console.print(f"[cyan]({idx}/{len(all_files)}) Preparando '{fname}'...[/cyan]")
 
+        # Se for CSV, mantém; se for Excel, converte
         if file_ext == ".csv":
             csv_path = original_path
         else:
-            # Converte Excel
             try:
                 csv_path = convert_excel_to_csv(original_path)
             except Exception as e:
                 console.print(f"[bold red]✗ Erro ao converter '{fname}' para CSV: {e}[bold red]")
                 continue
 
-        # Carrega para descobrir colunas
+        # Carregar para identificar colunas
         try:
             df_temp = load_csv_fallback(csv_path)
         except Exception as e:
@@ -5042,87 +5036,63 @@ def deduplicate_cpfs_across_files():
     for c_ in sorted(common_columns):
         console.print(f" - {c_}")
 
-    # 3) Usuário seleciona coluna de CPF
+    # 4) Usuário seleciona a coluna de CPF
     cpf_col = inquirer.select(
         message="Selecione a coluna de CPF (entre as colunas comuns):",
         choices=sorted(list(common_columns))
     ).execute()
 
-    # 4) Usuário define prioridades (1 = mais recente, 2 = menos recente, etc.)
-    file_list = list(file_csv_map.keys())
-    console.print("\n[cyan]Atribua números (1 = mais recente, 2 = menos recente, etc.) para cada arquivo:[/cyan]")
+    # 5) Remoção de duplicatas dentro de cada arquivo individualmente ----------------
+    console.print("\n[cyan]Removendo duplicatas dentro de cada arquivo...[/cyan]")
+    
+    file_dedup_map = {}
+    for fname, csv_path in file_csv_map.items():
+        try:
+            df_temp = load_csv_fallback(csv_path)
+            df_temp = df_temp.drop_duplicates(subset=[cpf_col], keep="first")  # Mantém a primeira ocorrência
+            file_dedup_map[fname] = df_temp
+        except Exception as e:
+            console.print(f"[bold red]✗ Erro ao remover duplicatas em '{fname}': {e}[bold red]")
 
+    # 6) Usuário define prioridades (1 = mais recente, maior = mais antigo) ----------
+    file_list = list(file_dedup_map.keys())
     order_map = {}
+
+    console.print("\n[cyan]Defina a prioridade dos arquivos (1 = mais recente, maior = mais antigo):[/cyan]")
     for fname in file_list:
         order_num = inquirer.text(
-            message=f"Qual a prioridade do arquivo '{fname}'? (1=mais recente, maior=mais antigo)"
+            message=f"Prioridade do arquivo '{fname}'? (1=mais recente, maior=mais antigo)"
         ).execute()
         try:
             order_val = int(order_num)
         except:
-            order_val = 999999  # fallback se inválido
+            order_val = 999999  # fallback
         order_map[fname] = order_val
 
-    # Ordenar por esse valor ASC => 1 é o mais recente
     file_list_sorted = sorted(file_list, key=lambda x: order_map[x])
 
-    console.print("\n[cyan]Ordem final do mais recente -> mais antigo:[/cyan]")
-    for i, f in enumerate(file_list_sorted, 1):
-        console.print(f" {i}. [bold]{f}[/bold]  (prioridade={order_map[f]})")
-
-    # 5) Deduplicar do **mais recente** para o **mais antigo**,
-    #    ou seja, do primeiro no file_list_sorted para o último.
-    final_dfs = {}
+    # 7) Removendo CPFs duplicados entre arquivos na ordem definida -------------------
+    console.print("\n[cyan]Removendo CPFs repetidos entre arquivos...[/cyan]")
     seen_cpfs = set()
+    final_dfs = {}
 
     for fname in file_list_sorted:
-        csv_path = file_csv_map[fname]
-        try:
-            df_current = load_csv_fallback(csv_path)
-        except Exception as e:
-            console.print(f"[bold red]✗ Erro ao recarregar '{fname}' (CSV): {e}[bold red]")
-            final_dfs[fname] = None
-            continue
+        df_temp = file_dedup_map[fname]
+        df_temp = df_temp[~df_temp[cpf_col].astype(str).isin(seen_cpfs)]
+        seen_cpfs.update(df_temp[cpf_col].unique())
+        final_dfs[fname] = df_temp
 
-        # Marca quem será mantido
-        df_current["KEEP"] = ~df_current[cpf_col].astype(str).isin(seen_cpfs)
-        df_filtered = df_current[df_current["KEEP"]].drop(columns=["KEEP"]).copy()
-
-        # Adiciona CPFs ao 'seen'
-        new_cpfs = df_filtered[cpf_col].unique()
-        for c in new_cpfs:
-            seen_cpfs.add(c)
-
-        final_dfs[fname] = df_filtered
-
-    # 6) Cria subpasta e salva CSV (sempre CSV) com sufixo "_dedup.csv"
+    # 8) Salvar arquivos finais na subpasta `dedup_priority` -------------------------
     subfolder_name = "dedup_priority"
     output_dir = os.path.join(folder_path, subfolder_name)
+    os.makedirs(output_dir, exist_ok=True)
 
-    try:
-        os.makedirs(output_dir, exist_ok=True)
-        console.print(f"\n[cyan]Criada subpasta de saída: {output_dir}[/cyan]")
-    except Exception as e:
-        console.print(f"[bold red]✗ Erro ao criar subpasta '{output_dir}': {e}[bold red]")
-        return
-
-    # Salvamos na ordem do file_list_sorted
     for fname in file_list_sorted:
-        out_df = final_dfs.get(fname, None)
-        if out_df is None:
-            console.print(f"[bold yellow]Arquivo '{fname}' não foi processado corretamente. Pulando...[bold yellow]")
-            continue
+        out_df = final_dfs[fname]
+        out_df.to_csv(os.path.join(output_dir, f"{Path(fname).stem}_dedup.csv"), index=False, sep=';', encoding='utf-8')
 
-        out_name = f"{Path(fname).stem}_dedup.csv"
-        out_path = os.path.join(output_dir, out_name)
+    console.print(f"\n[bold green]✓ Processo concluído com sucesso![bold green]\n")
 
-        try:
-            out_df.to_csv(out_path, index=False, sep=';', encoding='utf-8')
-            console.print(f"[green]✓ Salvo: {out_path}[green]")
-        except Exception as e:
-            console.print(f"[bold red]✗ Erro ao salvar '{out_path}': {e}[bold red]")
-
-    console.print(f"\n[bold green]✓ Processo de deduplicação concluído com sucesso![bold green]\n")
 
 
 def unify_csv_in_chunks_1m_lines():
