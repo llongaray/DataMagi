@@ -582,6 +582,96 @@ def unify_excel_files_with_cpf():
     output_file = filter_system.unify_excel_files_with_cpf(base_file_path, second_file_path, base_cpf_column, second_cpf_column, output_dir)
     print(f"\nArquivo unificado salvo em: {output_file}")
 
+def unify_files_with_cpf_csv():
+    """Função para unificar arquivos Excel ou CSV com base no CPF"""
+
+    import os
+    import pandas as pd
+    from InquirerPy import inquirer
+    from rich.console import Console
+
+    console = Console()
+    filter_system = ExcelFilter()
+
+    console.print("\n[bold yellow]╔══ Unificação de Arquivos (Excel ou CSV) pelo CPF ══╗[/bold yellow]\n")
+
+    # --------------------- Função auxiliar para carregar arquivo --------------------- #
+    def load_file(file_path):
+        """
+        Carrega um arquivo (Excel ou CSV) e retorna um DataFrame e a lista de colunas.
+        - Se for CSV, detecta separador automaticamente (; ou ,) e usa encoding adequado.
+        - Se for Excel, carrega usando engine "openpyxl".
+        """
+        if file_path.lower().endswith((".xlsx", ".xlsb", ".xls")):
+            df = pd.read_excel(file_path, engine="openpyxl", dtype=str)
+        elif file_path.lower().endswith(".csv"):
+            try:
+                df = pd.read_csv(file_path, sep=';', encoding='utf-8', dtype=str)
+            except UnicodeDecodeError:
+                df = pd.read_csv(file_path, sep=',', encoding='latin-1', dtype=str)
+        else:
+            console.print(f"[bold red]✗ Formato de arquivo não suportado: {file_path}[/bold red]\n")
+            return None, None
+        
+        return df, df.columns.tolist()
+
+    # --------------------- 1) Carregar o ARQUIVO BASE --------------------- #
+    base_file_path = inquirer.text(
+        message="Digite o caminho do ARQUIVO BASE (.xlsx, .xls, .xlsb ou .csv):"
+    ).execute()
+
+    df_base, base_headers = load_file(base_file_path)
+    if df_base is None:
+        return
+
+    # Seleciona a coluna de CPF no arquivo base
+    base_cpf_column = inquirer.select(
+        message="Selecione a coluna de CPF do ARQUIVO BASE:",
+        choices=base_headers
+    ).execute()
+
+    # --------------------- 2) Carregar o SEGUNDO ARQUIVO --------------------- #
+    second_file_path = inquirer.text(
+        message="Digite o caminho do SEGUNDO ARQUIVO (.xlsx, .xls, .xlsb ou .csv):"
+    ).execute()
+
+    df_second, second_headers = load_file(second_file_path)
+    if df_second is None:
+        return
+
+    # Seleciona a coluna de CPF no segundo arquivo
+    second_cpf_column = inquirer.select(
+        message="Selecione a coluna de CPF do SEGUNDO ARQUIVO:",
+        choices=second_headers
+    ).execute()
+
+    # --------------------- 3) Pergunta onde salvar --------------------- #
+    output_dir = inquirer.text(
+        message="Digite o caminho para salvar o arquivo unificado:"
+    ).execute()
+
+    if not os.path.isdir(output_dir):
+        console.print(f"[bold red]✗ O caminho '{output_dir}' não é uma pasta válida![bold red]\n")
+        return
+
+    # --------------------- 4) Unificação dos arquivos --------------------- #
+    console.print("\n[cyan]Unificando os arquivos com base no CPF...[/cyan]")
+
+    df_merged = pd.merge(df_base, df_second, how="left", left_on=base_cpf_column, right_on=second_cpf_column)
+
+    # Removemos a coluna de CPF duplicada (se existir)
+    if base_cpf_column != second_cpf_column:
+        df_merged.drop(columns=[second_cpf_column], inplace=True, errors="ignore")
+
+    # --------------------- 5) Salvar o arquivo final --------------------- #
+    output_file = os.path.join(output_dir, "arquivo_unificado.csv")
+
+    df_merged.to_csv(output_file, index=False, sep=';', encoding='utf-8')
+
+    console.print(f"\n[bold green]✓ Arquivo unificado salvo com sucesso![/bold green]")
+    console.print(f"[dim]📁 Arquivo salvo em: {output_file}[dim]\n")
+
+
 def adicionar_coluna_idade():
 
     import pandas as pd
@@ -5433,8 +5523,9 @@ def adicoes_unificacoes():
                 Choice("4", "Unificar todas as planilhas em uma pasta"),
                 Choice("5", "Unificar colunas DDD e Número"),
                 Choice("6", "Unificar dados (sem duplicar CPFs) [NOVA OPÇÃO]"),
-                Choice("7", "Mesclar XLSX da pasta em um CSV [NOVA FUNÇÃO]"),
-                Choice("8", "Voltar")
+                Choice("7", "Mesclar XLSX da pasta em um CSV"),
+                Choice("8", "Unificar arquivos Excel ou CSV pelo CPF [NOVA FUNÇÃO]"),  # <-- Nova opção no menu
+                Choice("9", "Voltar")
             ]
         ).execute()
 
@@ -5451,9 +5542,12 @@ def adicoes_unificacoes():
         elif choice == "6":
             unify_data_multiple_search_by_cpf_csv()
         elif choice == "7":
-            merge_folder_files_to_csv()  # <-- Chamada para a nova função
+            merge_folder_files_to_csv()
         elif choice == "8":
+            unify_files_with_cpf_csv()  # <-- Chamada para a nova função
+        elif choice == "9":
             break
+
 
 def formatacoes():
     while True:
