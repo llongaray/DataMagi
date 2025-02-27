@@ -5183,10 +5183,10 @@ def unify_csv_in_chunks_1m_lines():
 
     import os
     import pandas as pd
-    import csv  # Import para usar csv.QUOTE_MINIMAL
+    import csv
     from InquirerPy import inquirer
     from pathlib import Path
-    import uuid
+    import chardet
     from rich.console import Console
     console = Console()
 
@@ -5210,37 +5210,33 @@ def unify_csv_in_chunks_1m_lines():
     console.print(f"[cyan]→ Encontrados {len(all_files)} arquivos CSV na pasta.[/cyan]\n")
 
     # ---------------------------------------------------------------------------
-    # 2) Primeiro passo: Descobrir colunas comuns entre todos os CSVs
-    #    (fazemos só lendo o cabeçalho de cada CSV).
+    # 2) Descobrir colunas comuns (lendo só o cabeçalho de cada CSV).
     # ---------------------------------------------------------------------------
     def load_csv_header(csv_path):
         """Tenta ler somente o cabeçalho (primeira linha) para descobrir colunas."""
-        import csv
-        import chardet
-
-        # Detectar encoding apenas do cabeçalho (2KB de leitura)
         with open(csv_path, "rb") as f:
             raw = f.read(2048)
             enc_guess = chardet.detect(raw)
             encoding_used = enc_guess["encoding"] if enc_guess["confidence"] > 0.5 else "utf-8"
 
+        import csv
         with open(csv_path, "r", encoding=encoding_used, newline='') as f:
-            reader = csv.reader(f)
+            reader = csv.reader(f, delimiter=';')
             header = next(reader, None)
-            if header:
-                return header
-            else:
-                return []
+            if not header:  # Tentar delimiter=',' se falhar
+                f.seek(0)
+                reader = csv.reader(f, delimiter=',')
+                header = next(reader, None)
+            return header if header else []
 
     common_columns = None
-
     for idx, fname in enumerate(all_files, 1):
         csv_path = os.path.join(folder_path, fname)
         console.print(f"[cyan]({idx}/{len(all_files)}) Lendo cabeçalho de '{fname}'...[/cyan]")
 
         header_cols = load_csv_header(csv_path)
         if not header_cols:
-            console.print(f"[bold yellow]Arquivo '{fname}' está vazio ou sem cabeçalho.[bold yellow]")
+            console.print(f"[bold yellow]Arquivo '{fname}' está vazio ou sem cabeçalho.[/bold yellow]")
             continue
 
         cols_set = set(header_cols)
@@ -5253,23 +5249,22 @@ def unify_csv_in_chunks_1m_lines():
         console.print("[bold red]✗ Não há colunas em comum entre todos os arquivos CSV![/bold red]")
         return
 
-    console.print(f"\n[cyan]→ Colunas em comum detectadas: {len(common_columns)} colunas[/cyan]")
+    console.print(f"\n[cyan]→ Colunas em comum detectadas: {len(common_columns)}[/cyan]")
     sorted_common_cols = sorted(common_columns)
     for c_ in sorted_common_cols:
         console.print(f" - {c_}")
 
     # ---------------------------------------------------------------------------
-    # 3) Ler todos os arquivos CSV (apenas as colunas comuns) e concatenar.
+    # 3) Ler todos os arquivos CSV com fallback e concatenar apenas as colunas comuns.
     # ---------------------------------------------------------------------------
     console.print("\n[cyan]Lendo todos os arquivos (apenas colunas comuns) e unificando...[/cyan]")
-
     all_data = []
     total_lines = 0
 
     def fallback_read_csv_with_subset(path, usecols):
         """
-        Faz um fallback simples, usando read_csv + supõe ; ou , e utf-8 ou latin-1,
-        mas filtra apenas as colunas do 'usecols'.
+        Tenta ler CSV com ; ou , e codificação utf-8 ou latin-1, usando apenas as colunas 'usecols'.
+        Força dtype=str para tratar tudo como texto.
         """
         # Tenta ; + utf-8
         try:
@@ -5293,7 +5288,7 @@ def unify_csv_in_chunks_1m_lines():
         try:
             df_temp = fallback_read_csv_with_subset(csv_path, usecols=sorted_common_cols)
         except Exception as e:
-            console.print(f"[bold red]✗ Erro ao ler '{fname}' (colunas comuns): {e}[bold red]")
+            console.print(f"[bold red]✗ Erro ao ler '{fname}' (colunas comuns): {e}[/bold red]")
             continue
 
         lines_now = len(df_temp)
@@ -5317,14 +5312,13 @@ def unify_csv_in_chunks_1m_lines():
     chunk_size = 1_000_000
     total_rows = len(df_unified)
 
-    # Cria subpasta
     subfolder_name = "unified_csv_1m"
     output_dir = os.path.join(folder_path, subfolder_name)
     try:
         os.makedirs(output_dir, exist_ok=True)
         console.print(f"\n[cyan]Subpasta criada/aberta: {output_dir}[/cyan]")
     except Exception as e:
-        console.print(f"[bold red]✗ Erro ao criar subpasta '{output_dir}': {e}[bold red]")
+        console.print(f"[bold red]✗ Erro ao criar subpasta '{output_dir}': {e}[/bold red]")
         return
 
     num_chunks = (total_rows // chunk_size) + (1 if total_rows % chunk_size else 0)
@@ -5338,13 +5332,16 @@ def unify_csv_in_chunks_1m_lines():
         chunk_name = f"unified_chunk_{chunk_index + 1}.csv"
         chunk_path = os.path.join(output_dir, chunk_name)
 
-        # Usar QUOTE_MINIMAL para evitar colocar aspas na linha inteira.
+        # QUOTE_NONE -> não coloca aspas em campos
+        # Nenhuma célula será envolvida por aspas mesmo que contenha caracteres especiais
+        # Substituir escapechar se desejar (evitar perda de dados).
         df_chunk.to_csv(
             chunk_path,
             index=False,
             sep=';',
             encoding='utf-8',
-            quoting=csv.QUOTE_MINIMAL  # Apenas campos que precisarem de aspas
+            quoting=csv.QUOTE_NONE,
+            escapechar='\\'
         )
         console.print(f"[green]✓ Salvo: {chunk_path} com {len(df_chunk):,} linhas.[/green]")
 
@@ -5352,6 +5349,7 @@ def unify_csv_in_chunks_1m_lines():
 
     console.print(f"\n[bold green]✓ Processo concluído com sucesso![bold green]")
     console.print(f"[dim]Arquivos finais em: {output_dir}[dim]\n")
+
 
 
 
